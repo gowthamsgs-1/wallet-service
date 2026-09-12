@@ -3,7 +3,10 @@ package org.sgs.walletservice.service;
 import org.sgs.walletservice.domain.Wallet;
 import org.sgs.walletservice.exception.ForbiddenException;
 import org.sgs.walletservice.exception.ResourceNotFoundException;
+import org.sgs.walletservice.logging.DomainEvents;
 import org.sgs.walletservice.repo.WalletRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -12,6 +15,8 @@ import java.util.Optional;
 
 @Service
 public class WalletService {
+
+    private static final Logger log = LoggerFactory.getLogger(WalletService.class);
 
     private final WalletRepository walletRepository;
 
@@ -37,7 +42,13 @@ public class WalletService {
 
         try {
             Wallet newWallet = new Wallet(userId, initialBalancePaise);
-            return walletRepository.save(newWallet);
+            Wallet saved = walletRepository.save(newWallet);
+            log.atInfo()
+                    .addKeyValue("event", DomainEvents.WALLET_CREATED)
+                    .addKeyValue("owner_id", saved.getOwnerId())
+                    .addKeyValue("balance_paise", saved.getBalancePaise())
+                    .log("Wallet {} created for owner {}", saved.getId(), saved.getOwnerId());
+            return saved;
         } catch (DataIntegrityViolationException ex) {
             // In case of concurrent creation, return the one that succeeded
             return walletRepository.findByOwnerId(userId)
@@ -57,5 +68,3 @@ public class WalletService {
         return wallet;
     }
 }
-
-

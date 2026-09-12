@@ -10,9 +10,13 @@ import org.sgs.walletservice.exception.ConflictException;
 import org.sgs.walletservice.exception.ForbiddenException;
 import org.sgs.walletservice.exception.InsufficientFundsException;
 import org.sgs.walletservice.exception.ResourceNotFoundException;
+import org.sgs.walletservice.logging.DomainEvents;
 import org.sgs.walletservice.repo.IdempotencyRecordRepository;
 import org.sgs.walletservice.repo.TransferRepository;
 import org.sgs.walletservice.repo.WalletRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.spi.LoggingEventBuilder;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,6 +27,8 @@ import java.util.stream.Stream;
 
 @Service
 public class TransferService {
+
+    private static final Logger log = LoggerFactory.getLogger(TransferService.class);
 
     private final WalletRepository walletRepository;
     private final TransferRepository transferRepository;
@@ -39,10 +45,12 @@ public class TransferService {
     @Transactional(noRollbackFor = InsufficientFundsException.class)
     public Transfer executeTransfer(String callerId, TransferRequest request) {
         if (request.from().equals(request.to())) {
+            declined(callerId, request, "same_wallet", "Source and destination wallets must be different");
             throw new BadRequestException("Source and destination wallets must be different");
         }
 
         if (request.amountPaise() == null || request.amountPaise() <= 0) {
+            declined(callerId, request, "non_positive_amount", "Transfer amount must be strictly positive");
             throw new BadRequestException("Transfer amount must be strictly positive");
         }
 
@@ -54,6 +62,8 @@ public class TransferService {
 
             // The key belongs to whoever used it first; nobody else may reuse it.
             if (!record.getCallerId().equals(callerId)) {
+                declined(callerId, request, "idempotency_key_owned_by_another_caller",
+                        "Idempotency key is already in use by another caller");
                 throw new ConflictException("Idempotency key '" + request.idempotencyKey()
                         + "' is already in use by another caller");
             }
@@ -69,6 +79,8 @@ public class TransferService {
 
             // A reused key with a different payload is a conflict, never a second debit.
             if (!storedHash.equals(requestFingerprint(request))) {
+                declined(callerId, request, "idempotency_key_payload_mismatch",
+                        "Idempotency key was already used with a different request payload");
                 throw new ConflictException("Idempotency key '" + request.idempotencyKey()
                         + "' was already used with a different request payload");
             }
@@ -78,6 +90,11 @@ public class TransferService {
                 record.setRequestHash(storedHash);
                 idempotencyRecordRepository.save(record);
             }
+
+            event(DomainEvents.TRANSFER_IDEMPOTENT_REPLAY, callerId, request)
+                    .addKeyValue("transfer_id", existingTransfer.getId())
+                    .addKeyValue("original_status", existingTransfer.getStatus().name())
+                    .log("Idempotent replay hit; returning the original outcome without moving money");
 
             // Replay the original outcome, including failures
             if (existingTransfer.getStatus() == TransferStatus.FAILED) {
@@ -110,6 +127,8 @@ public class TransferService {
 
             // Verify caller owns the source wallet
             if (!fromWallet.getOwnerId().equals(callerId)) {
+                declined(callerId, request, "caller_does_not_own_source_wallet",
+                        "Caller does not own the source wallet");
                 throw new ForbiddenException("Access denied: Caller '" + callerId + "' does not own wallet " + request.from());
             }
 
@@ -131,6 +150,12 @@ public class TransferService {
                 idempotencyRecordRepository.save(new IdempotencyRecord(callerId, request.idempotencyKey(),
                         failedTransfer.getId(), requestFingerprint(request)));
 
+                event(DomainEvents.TRANSFER_DECLINED, callerId, request)
+                        .addKeyValue("transfer_id", failedTransfer.getId())
+                        .addKeyValue("reason", "insufficient_funds")
+                        .addKeyValue("available_paise", fromWallet.getBalancePaise())
+                        .log("Transfer declined: {}", reason);
+
                 throw new InsufficientFundsException(reason);
             }
 
@@ -139,6 +164,12 @@ public class TransferService {
             toWallet.setBalancePaise(toWallet.getBalancePaise() + request.amountPaise());
             walletRepository.save(fromWallet);
             walletRepository.save(toWallet);
+
+            event(DomainEvents.TRANSFER_DEBITED, callerId, request)
+                    .log("Debited {} paise from wallet {}", request.amountPaise(), fromWallet.getId());
+
+            event(DomainEvents.TRANSFER_CREDITED, callerId, request)
+                    .log("Credited {} paise to wallet {}", request.amountPaise(), toWallet.getId());
 
             Transfer completedTransfer = new Transfer(
                     request.from(),
@@ -153,6 +184,11 @@ public class TransferService {
             idempotencyRecordRepository.save(new IdempotencyRecord(callerId, request.idempotencyKey(),
                     completedTransfer.getId(), requestFingerprint(request)));
 
+            event(DomainEvents.TRANSFER_CREATED, callerId, request)
+                    .addKeyValue("transfer_id", completedTransfer.getId())
+                    .addKeyValue("status", completedTransfer.getStatus().name())
+                    .log("Transfer {} completed", completedTransfer.getId());
+
             return completedTransfer;
         } catch (DataIntegrityViolationException ex) {
             // Concurrent execution with the same idempotency key
@@ -161,9 +197,16 @@ public class TransferService {
                     .orElseThrow(() -> ex);
 
             if (!raced.getCallerId().equals(callerId)) {
+                declined(callerId, request, "idempotency_key_owned_by_another_caller",
+                        "Idempotency key is already in use by another caller");
                 throw new ConflictException("Idempotency key '" + request.idempotencyKey()
                         + "' is already in use by another caller");
             }
+
+            event(DomainEvents.TRANSFER_IDEMPOTENT_REPLAY, callerId, request)
+                    .addKeyValue("transfer_id", raced.getTransferId())
+                    .addKeyValue("race", true)
+                    .log("Concurrent request lost the idempotency race; returning the winning transfer");
 
             return transferRepository.findById(raced.getTransferId()).orElseThrow(() -> ex);
         }
@@ -189,6 +232,26 @@ public class TransferService {
         }
 
         return transfer;
+    }
+
+    /**
+     * Starts a log event pre-populated with the fields every transfer event carries.
+     * The correlation id is supplied automatically from the MDC by the structured log format.
+     */
+    private LoggingEventBuilder event(String eventName, String callerId, TransferRequest request) {
+        return log.atInfo()
+                .addKeyValue("event", eventName)
+                .addKeyValue("caller_id", callerId)
+                .addKeyValue("from_wallet_id", request.from())
+                .addKeyValue("to_wallet_id", request.to())
+                .addKeyValue("amount_paise", request.amountPaise())
+                .addKeyValue("idempotency_key", request.idempotencyKey());
+    }
+
+    private void declined(String callerId, TransferRequest request, String reason, String message) {
+        event(DomainEvents.TRANSFER_DECLINED, callerId, request)
+                .addKeyValue("reason", reason)
+                .log("Transfer declined: {}", message);
     }
 
     /**

@@ -21,6 +21,7 @@ import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -32,6 +33,9 @@ public class WalletTransferIntegrationTests {
 
     @Autowired
     private org.sgs.walletservice.auth.BearerTokenFilter bearerTokenFilter;
+
+    @Autowired
+    private org.sgs.walletservice.logging.CorrelationIdFilter correlationIdFilter;
 
     @Autowired
     private WalletRepository walletRepository;
@@ -50,6 +54,7 @@ public class WalletTransferIntegrationTests {
     @BeforeEach
     void setUp() {
         mockMvc = MockMvcBuilders.webAppContextSetup(context)
+                .addFilter(correlationIdFilter)
                 .addFilter(bearerTokenFilter)
                 .build();
         idempotencyRecordRepository.deleteAll();
@@ -73,6 +78,24 @@ public class WalletTransferIntegrationTests {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
                 .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void shouldReturnGeneratedCorrelationIdWhenNoneSupplied() throws Exception {
+        mockMvc.perform(post("/wallets")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice"))
+                .andExpect(status().isOk())
+                .andExpect(header().exists("X-Correlation-Id"))
+                .andExpect(header().string("X-Correlation-Id", not(blankOrNullString())));
+    }
+
+    @Test
+    void shouldEchoSuppliedCorrelationId() throws Exception {
+        mockMvc.perform(post("/wallets")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
+                        .header("X-Correlation-Id", "trace-abc-123"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Correlation-Id", is("trace-abc-123")));
     }
 
     @Test
