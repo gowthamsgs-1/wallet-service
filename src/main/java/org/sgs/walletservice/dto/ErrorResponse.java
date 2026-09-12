@@ -1,5 +1,7 @@
 package org.sgs.walletservice.dto;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.time.Instant;
 
 public record ErrorResponse(

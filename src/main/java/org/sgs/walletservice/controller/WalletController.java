@@ -1,9 +1,10 @@
 package org.sgs.walletservice.controller;
 
+import jakarta.validation.Valid;
+import org.sgs.walletservice.auth.AuthContext;
 import org.sgs.walletservice.domain.Wallet;
 import org.sgs.walletservice.dto.CreateWalletRequest;
 import org.sgs.walletservice.dto.WalletResponse;
-import org.sgs.walletservice.exception.BadRequestException;
 import org.sgs.walletservice.service.WalletService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -19,18 +20,22 @@ public class WalletController {
     }
 
     @PostMapping
-    public ResponseEntity<WalletResponse> getOrCreateWallet(@RequestBody(required = false) CreateWalletRequest request) {
-        if (request == null || request.userId() == null || request.userId().isBlank()) {
-            throw new BadRequestException("Request body must contain 'user_id'");
-        }
-        Wallet wallet = walletService.getOrCreateWallet(request.userId(), request.initialBalancePaise());
+    public ResponseEntity<WalletResponse> getOrCreateWallet(@Valid @RequestBody(required = false) CreateWalletRequest request) {
+        String userId = AuthContext.getCurrentUser();
+        long initialBalance = (request != null && request.initialBalancePaise() != null)
+                ? request.initialBalancePaise()
+                : 0L;
+        Wallet wallet = walletService.getOrCreateWallet(userId, initialBalance);
         return ResponseEntity.ok(WalletResponse.from(wallet));
     }
 
-    @GetMapping({"/{id}"})
+    @GetMapping({"/{id}", "/{id}/"})
     public ResponseEntity<WalletResponse> getWallet(@PathVariable Long id) {
-        Wallet wallet = walletService.getWalletById(id);
+        String userId = AuthContext.getCurrentUser();
+        Wallet wallet = walletService.getWalletById(id, userId);
         return ResponseEntity.ok(WalletResponse.from(wallet));
     }
 }
+
+
 

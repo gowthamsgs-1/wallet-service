@@ -29,6 +29,7 @@ public class WalletControllerTest {
         mockMvc.perform(post("/wallets")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"user_id\": \"alice\"}"))
+                .andDo(org.springframework.test.web.servlet.result.MockMvcResultHandlers.print())
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id", notNullValue()))
                 .andExpect(jsonPath("$.user_id", is("alice")))

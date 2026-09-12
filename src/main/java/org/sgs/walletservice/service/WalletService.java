@@ -1,49 +1,61 @@
 package org.sgs.walletservice.service;
 
 import org.sgs.walletservice.domain.Wallet;
-import org.sgs.walletservice.exception.BadRequestException;
+import org.sgs.walletservice.exception.ForbiddenException;
 import org.sgs.walletservice.exception.ResourceNotFoundException;
+import org.sgs.walletservice.repo.WalletRepository;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.Optional;
 
 @Service
 public class WalletService {
 
-    private final Map<Long, Wallet> walletsById = new ConcurrentHashMap<>();
-    private final Map<String, Wallet> walletsByUserId = new ConcurrentHashMap<>();
-    private final AtomicLong idGenerator = new AtomicLong(1);
+    private final WalletRepository walletRepository;
 
-    public Wallet getOrCreateWallet(String userId, Long initialBalancePaise) {
-        if (userId == null || userId.isBlank()) {
-            throw new BadRequestException("User ID must not be blank");
-        }
-
-        long initialBalance = (initialBalancePaise != null) ? initialBalancePaise : 0L;
-        if (initialBalance < 0) {
-            throw new BadRequestException("Initial balance must not be negative");
-        }
-
-        return walletsByUserId.computeIfAbsent(userId, uid -> {
-            long newId = idGenerator.getAndIncrement();
-            Wallet wallet = new Wallet(newId, uid, initialBalance);
-            walletsById.put(newId, wallet);
-            return wallet;
-        });
+    public WalletService(WalletRepository walletRepository) {
+        this.walletRepository = walletRepository;
     }
 
-    public Wallet getWalletById(Long id) {
-        if (id == null) {
-            throw new BadRequestException("Wallet ID must not be null");
+    @Transactional
+    public Wallet getOrCreateWallet(String userId) {
+        return getOrCreateWallet(userId, 0L);
+    }
+
+    @Transactional
+    public Wallet getOrCreateWallet(String userId, long initialBalancePaise) {
+        if (initialBalancePaise < 0) {
+            throw new org.sgs.walletservice.exception.BadRequestException("Initial balance must not be negative");
         }
 
-        Wallet wallet = walletsById.get(id);
-        if (wallet == null) {
-            throw new ResourceNotFoundException("Wallet not found with id: " + id);
+        Optional<Wallet> existing = walletRepository.findByOwnerId(userId);
+        if (existing.isPresent()) {
+            return existing.get();
         }
+
+        try {
+            Wallet newWallet = new Wallet(userId, initialBalancePaise);
+            return walletRepository.save(newWallet);
+        } catch (DataIntegrityViolationException ex) {
+            // In case of concurrent creation, return the one that succeeded
+            return walletRepository.findByOwnerId(userId)
+                    .orElseThrow(() -> new IllegalStateException("Failed to get or create wallet for user: " + userId));
+        }
+    }
+
+    @Transactional(readOnly = true)
+    public Wallet getWalletById(Long walletId, String callerId) {
+        Wallet wallet = walletRepository.findById(walletId)
+                .orElseThrow(() -> new ResourceNotFoundException("Wallet not found with id: " + walletId));
+
+        if (!wallet.getOwnerId().equals(callerId)) {
+            throw new ForbiddenException("Access denied: You do not own wallet " + walletId);
+        }
+
         return wallet;
     }
 }
+
 
