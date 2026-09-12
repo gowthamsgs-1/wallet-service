@@ -49,6 +49,9 @@ public class WalletTransferIntegrationTests {
     @Autowired
     private ObjectMapper objectMapper;
 
+    @Autowired
+    private io.micrometer.core.instrument.MeterRegistry meterRegistry;
+
     private MockMvc mockMvc;
 
     @BeforeEach
@@ -327,6 +330,54 @@ public class WalletTransferIntegrationTests {
         // Only Alice's 5,000 paise moved
         assertEquals(95_000L, walletRepository.findById(aliceWallet.getId()).orElseThrow().getBalancePaise());
         assertEquals(25_000L, walletRepository.findById(bobWallet.getId()).orElseThrow().getBalancePaise());
+    }
+
+    @Test
+    void shouldRecordDomainCounters() throws Exception {
+        Wallet aliceWallet = walletRepository.findByOwnerId("alice").orElseThrow();
+        Wallet bobWallet = walletRepository.findByOwnerId("bob").orElseThrow();
+
+        double createdBefore = counter("wallet.transfers.created", null);
+        double declinedBefore = counter("wallet.transfers.declined", "insufficient_funds");
+        double replaysBefore = counter("wallet.transfers.idempotent_replays", null);
+
+        // 1. A successful transfer
+        TransferRequest ok = new TransferRequest(
+                aliceWallet.getId(), bobWallet.getId(), 1_000L, "metrics-ok");
+        mockMvc.perform(post("/transfers")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(ok)))
+                .andExpect(status().isCreated());
+
+        // 2. Replaying the same key
+        mockMvc.perform(post("/transfers")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(ok)))
+                .andExpect(status().isCreated());
+
+        // 3. A transfer that cannot be funded
+        TransferRequest broke = new TransferRequest(
+                aliceWallet.getId(), bobWallet.getId(), 9_999_999L, "metrics-broke");
+        mockMvc.perform(post("/transfers")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(broke)))
+                .andExpect(status().isUnprocessableEntity());
+
+        assertEquals(createdBefore + 1, counter("wallet.transfers.created", null));
+        assertEquals(declinedBefore + 1, counter("wallet.transfers.declined", "insufficient_funds"));
+        assertEquals(replaysBefore + 1, counter("wallet.transfers.idempotent_replays", null));
+    }
+
+    private double counter(String name, String reasonTag) {
+        var search = meterRegistry.find(name);
+        if (reasonTag != null) {
+            search = search.tag("reason", reasonTag);
+        }
+        io.micrometer.core.instrument.Counter counter = search.counter();
+        return (counter != null) ? counter.count() : 0d;
     }
 
     @Test

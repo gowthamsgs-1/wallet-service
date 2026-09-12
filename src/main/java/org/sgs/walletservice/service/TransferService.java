@@ -11,6 +11,7 @@ import org.sgs.walletservice.exception.ForbiddenException;
 import org.sgs.walletservice.exception.InsufficientFundsException;
 import org.sgs.walletservice.exception.ResourceNotFoundException;
 import org.sgs.walletservice.logging.DomainEvents;
+import org.sgs.walletservice.metrics.WalletMetrics;
 import org.sgs.walletservice.repo.IdempotencyRecordRepository;
 import org.sgs.walletservice.repo.TransferRepository;
 import org.sgs.walletservice.repo.WalletRepository;
@@ -33,13 +34,16 @@ public class TransferService {
     private final WalletRepository walletRepository;
     private final TransferRepository transferRepository;
     private final IdempotencyRecordRepository idempotencyRecordRepository;
+    private final WalletMetrics metrics;
 
     public TransferService(WalletRepository walletRepository,
                            TransferRepository transferRepository,
-                           IdempotencyRecordRepository idempotencyRecordRepository) {
+                           IdempotencyRecordRepository idempotencyRecordRepository,
+                           WalletMetrics metrics) {
         this.walletRepository = walletRepository;
         this.transferRepository = transferRepository;
         this.idempotencyRecordRepository = idempotencyRecordRepository;
+        this.metrics = metrics;
     }
 
     @Transactional(noRollbackFor = InsufficientFundsException.class)
@@ -91,6 +95,7 @@ public class TransferService {
                 idempotencyRecordRepository.save(record);
             }
 
+            metrics.transferIdempotentReplay();
             event(DomainEvents.TRANSFER_IDEMPOTENT_REPLAY, callerId, request)
                     .addKeyValue("transfer_id", existingTransfer.getId())
                     .addKeyValue("original_status", existingTransfer.getStatus().name())
@@ -150,6 +155,7 @@ public class TransferService {
                 idempotencyRecordRepository.save(new IdempotencyRecord(callerId, request.idempotencyKey(),
                         failedTransfer.getId(), requestFingerprint(request)));
 
+                metrics.transferDeclinedInsufficientFunds();
                 event(DomainEvents.TRANSFER_DECLINED, callerId, request)
                         .addKeyValue("transfer_id", failedTransfer.getId())
                         .addKeyValue("reason", "insufficient_funds")
@@ -184,6 +190,7 @@ public class TransferService {
             idempotencyRecordRepository.save(new IdempotencyRecord(callerId, request.idempotencyKey(),
                     completedTransfer.getId(), requestFingerprint(request)));
 
+            metrics.transferCreated();
             event(DomainEvents.TRANSFER_CREATED, callerId, request)
                     .addKeyValue("transfer_id", completedTransfer.getId())
                     .addKeyValue("status", completedTransfer.getStatus().name())
@@ -203,6 +210,7 @@ public class TransferService {
                         + "' is already in use by another caller");
             }
 
+            metrics.transferIdempotentReplay();
             event(DomainEvents.TRANSFER_IDEMPOTENT_REPLAY, callerId, request)
                     .addKeyValue("transfer_id", raced.getTransferId())
                     .addKeyValue("race", true)
@@ -249,6 +257,7 @@ public class TransferService {
     }
 
     private void declined(String callerId, TransferRequest request, String reason, String message) {
+        metrics.transferDeclined(reason);
         event(DomainEvents.TRANSFER_DECLINED, callerId, request)
                 .addKeyValue("reason", reason)
                 .log("Transfer declined: {}", message);
