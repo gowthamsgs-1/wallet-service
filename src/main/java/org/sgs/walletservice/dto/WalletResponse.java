@@ -11,6 +11,9 @@ public record WalletResponse(
         @JsonProperty("owner_id")
         @JsonAlias("ownerId")
         String ownerId,
+        @JsonProperty("user_id")
+        @JsonAlias("userId")
+        String userId,
         @JsonProperty("balance_paise")
         @JsonAlias("balancePaise")
         long balancePaise,
@@ -22,9 +25,9 @@ public record WalletResponse(
         return new WalletResponse(
                 wallet.getId(),
                 wallet.getOwnerId(),
+                wallet.getOwnerId(),
                 wallet.getBalancePaise(),
                 wallet.getCreatedAt()
         );
     }
 }
-

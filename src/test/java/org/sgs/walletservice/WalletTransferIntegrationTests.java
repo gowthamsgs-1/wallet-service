@@ -240,6 +240,73 @@ public class WalletTransferIntegrationTests {
     }
 
     @Test
+    void shouldRejectReusedIdempotencyKeyWithDifferentBody() throws Exception {
+        Wallet aliceWallet = walletRepository.findByOwnerId("alice").orElseThrow();
+        Wallet bobWallet = walletRepository.findByOwnerId("bob").orElseThrow();
+
+        // First attempt fails due to insufficient funds
+        TransferRequest tooBig = new TransferRequest(
+                aliceWallet.getId(), bobWallet.getId(), 999_999L, "reused-key");
+
+        mockMvc.perform(post("/transfers")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(tooBig)))
+                .andExpect(status().isUnprocessableEntity());
+
+        // Same key, smaller amount -> conflict, NOT a new debit
+        TransferRequest smaller = new TransferRequest(
+                aliceWallet.getId(), bobWallet.getId(), 1_000L, "reused-key");
+
+        mockMvc.perform(post("/transfers")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(smaller)))
+                .andExpect(status().isConflict());
+
+        // Same key, identical body -> original failure is replayed
+        mockMvc.perform(post("/transfers")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(tooBig)))
+                .andExpect(status().isUnprocessableEntity());
+
+        // Balances untouched
+        assertEquals(100_000L, walletRepository.findById(aliceWallet.getId()).orElseThrow().getBalancePaise());
+        assertEquals(20_000L, walletRepository.findById(bobWallet.getId()).orElseThrow().getBalancePaise());
+    }
+
+    @Test
+    void shouldRejectIdempotencyKeyReusedByAnotherCaller() throws Exception {
+        Wallet aliceWallet = walletRepository.findByOwnerId("alice").orElseThrow();
+        Wallet bobWallet = walletRepository.findByOwnerId("bob").orElseThrow();
+
+        // Alice claims the key
+        TransferRequest aliceRequest = new TransferRequest(
+                aliceWallet.getId(), bobWallet.getId(), 5_000L, "shared-key");
+
+        mockMvc.perform(post("/transfers")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(aliceRequest)))
+                .andExpect(status().isCreated());
+
+        // Bob tries the same key for his own transfer -> conflict, no transfer performed
+        TransferRequest bobRequest = new TransferRequest(
+                bobWallet.getId(), aliceWallet.getId(), 1_000L, "shared-key");
+
+        mockMvc.perform(post("/transfers")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer tok-bob")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(bobRequest)))
+                .andExpect(status().isConflict());
+
+        // Only Alice's 5,000 paise moved
+        assertEquals(95_000L, walletRepository.findById(aliceWallet.getId()).orElseThrow().getBalancePaise());
+        assertEquals(25_000L, walletRepository.findById(bobWallet.getId()).orElseThrow().getBalancePaise());
+    }
+
+    @Test
     void shouldForbidTransferFromWalletNotOwnedByCaller() throws Exception {
         Wallet aliceWallet = walletRepository.findByOwnerId("alice").orElseThrow();
         Wallet bobWallet = walletRepository.findByOwnerId("bob").orElseThrow();

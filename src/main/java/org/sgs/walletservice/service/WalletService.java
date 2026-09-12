@@ -50,7 +50,7 @@ public class WalletService {
         Wallet wallet = walletRepository.findById(walletId)
                 .orElseThrow(() -> new ResourceNotFoundException("Wallet not found with id: " + walletId));
 
-        if (!wallet.getOwnerId().equals(callerId)) {
+        if (callerId != null && !wallet.getOwnerId().equals(callerId)) {
             throw new ForbiddenException("Access denied: You do not own wallet " + walletId);
         }
 

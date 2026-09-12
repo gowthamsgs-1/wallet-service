@@ -6,6 +6,7 @@ import org.sgs.walletservice.domain.TransferStatus;
 import org.sgs.walletservice.domain.Wallet;
 import org.sgs.walletservice.dto.TransferRequest;
 import org.sgs.walletservice.exception.BadRequestException;
+import org.sgs.walletservice.exception.ConflictException;
 import org.sgs.walletservice.exception.ForbiddenException;
 import org.sgs.walletservice.exception.InsufficientFundsException;
 import org.sgs.walletservice.exception.ResourceNotFoundException;
@@ -45,12 +46,47 @@ public class TransferService {
             throw new BadRequestException("Transfer amount must be strictly positive");
         }
 
-        // Idempotency check: if already processed for this caller and idempotency key, return existing
+        // Idempotency check: keys are globally unique, so look up by key alone
         Optional<IdempotencyRecord> existingRecord = idempotencyRecordRepository
-                .findByCallerIdAndIdempotencyKey(callerId, request.idempotencyKey());
+                .findByIdempotencyKey(request.idempotencyKey());
         if (existingRecord.isPresent()) {
-            return transferRepository.findById(existingRecord.get().getTransferId())
+            IdempotencyRecord record = existingRecord.get();
+
+            // The key belongs to whoever used it first; nobody else may reuse it.
+            if (!record.getCallerId().equals(callerId)) {
+                throw new ConflictException("Idempotency key '" + request.idempotencyKey()
+                        + "' is already in use by another caller");
+            }
+
+            Transfer existingTransfer = transferRepository.findById(record.getTransferId())
                     .orElseThrow(() -> new IllegalStateException("Transfer record missing for existing idempotency key"));
+
+            // Records created before request fingerprinting existed have a null hash;
+            // fall back to the stored transfer's own from/to/amount.
+            String storedHash = record.getRequestHash() != null
+                    ? record.getRequestHash()
+                    : fingerprint(existingTransfer.getFromWalletId(), existingTransfer.getToWalletId(), existingTransfer.getAmountPaise());
+
+            // A reused key with a different payload is a conflict, never a second debit.
+            if (!storedHash.equals(requestFingerprint(request))) {
+                throw new ConflictException("Idempotency key '" + request.idempotencyKey()
+                        + "' was already used with a different request payload");
+            }
+
+            // Backfill so the comparison is cheap and exact next time
+            if (record.getRequestHash() == null) {
+                record.setRequestHash(storedHash);
+                idempotencyRecordRepository.save(record);
+            }
+
+            // Replay the original outcome, including failures
+            if (existingTransfer.getStatus() == TransferStatus.FAILED) {
+                throw new InsufficientFundsException(existingTransfer.getFailureReason() != null
+                        ? existingTransfer.getFailureReason()
+                        : "Transfer previously failed for idempotency key " + request.idempotencyKey());
+            }
+
+            return existingTransfer;
         }
 
         try {
@@ -92,7 +128,8 @@ public class TransferService {
                         request.idempotencyKey()
                 );
                 failedTransfer = transferRepository.save(failedTransfer);
-                idempotencyRecordRepository.save(new IdempotencyRecord(callerId, request.idempotencyKey(), failedTransfer.getId()));
+                idempotencyRecordRepository.save(new IdempotencyRecord(callerId, request.idempotencyKey(),
+                        failedTransfer.getId(), requestFingerprint(request)));
 
                 throw new InsufficientFundsException(reason);
             }
@@ -113,14 +150,22 @@ public class TransferService {
                     request.idempotencyKey()
             );
             completedTransfer = transferRepository.save(completedTransfer);
-            idempotencyRecordRepository.save(new IdempotencyRecord(callerId, request.idempotencyKey(), completedTransfer.getId()));
+            idempotencyRecordRepository.save(new IdempotencyRecord(callerId, request.idempotencyKey(),
+                    completedTransfer.getId(), requestFingerprint(request)));
 
             return completedTransfer;
         } catch (DataIntegrityViolationException ex) {
-            // Concurrent execution with identical idempotency key
-            return idempotencyRecordRepository.findByCallerIdAndIdempotencyKey(callerId, request.idempotencyKey())
-                    .flatMap(rec -> transferRepository.findById(rec.getTransferId()))
+            // Concurrent execution with the same idempotency key
+            IdempotencyRecord raced = idempotencyRecordRepository
+                    .findByIdempotencyKey(request.idempotencyKey())
                     .orElseThrow(() -> ex);
+
+            if (!raced.getCallerId().equals(callerId)) {
+                throw new ConflictException("Idempotency key '" + request.idempotencyKey()
+                        + "' is already in use by another caller");
+            }
+
+            return transferRepository.findById(raced.getTransferId()).orElseThrow(() -> ex);
         }
     }
 
@@ -144,6 +189,30 @@ public class TransferService {
         }
 
         return transfer;
+    }
+
+    /**
+     * Stable fingerprint of the business-meaningful parts of the request body.
+     * Used to detect an idempotency key being reused with a different payload.
+     */
+    private String requestFingerprint(TransferRequest request) {
+        return fingerprint(request.from(), request.to(), request.amountPaise());
+    }
+
+    private String fingerprint(Long from, Long to, Long amountPaise) {
+        String canonical = from + "|" + to + "|" + amountPaise;
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(canonical.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+                sb.append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 algorithm not available", e);
+        }
     }
 }
 

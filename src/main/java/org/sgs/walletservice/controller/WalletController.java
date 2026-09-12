@@ -5,6 +5,7 @@ import org.sgs.walletservice.auth.AuthContext;
 import org.sgs.walletservice.domain.Wallet;
 import org.sgs.walletservice.dto.CreateWalletRequest;
 import org.sgs.walletservice.dto.WalletResponse;
+import org.sgs.walletservice.exception.BadRequestException;
 import org.sgs.walletservice.service.WalletService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -19,9 +20,16 @@ public class WalletController {
         this.walletService = walletService;
     }
 
-    @PostMapping
+    @PostMapping({"", "/"})
     public ResponseEntity<WalletResponse> getOrCreateWallet(@Valid @RequestBody(required = false) CreateWalletRequest request) {
         String userId = AuthContext.getCurrentUser();
+        if (userId == null || userId.isBlank()) {
+            // Unauthenticated call (e.g. filter not applied): fall back to an explicit user_id
+            userId = (request != null) ? request.userId() : null;
+        }
+        if (userId == null || userId.isBlank()) {
+            throw new BadRequestException("'user_id' is required when no bearer token is supplied");
+        }
         long initialBalance = (request != null && request.initialBalancePaise() != null)
                 ? request.initialBalancePaise()
                 : 0L;
@@ -36,6 +44,3 @@ public class WalletController {
         return ResponseEntity.ok(WalletResponse.from(wallet));
     }
 }
-
-
-

@@ -11,7 +11,7 @@ import java.time.Instant;
 @Table(
         name = "idempotency_records",
         uniqueConstraints = {
-                @UniqueConstraint(name = "uk_caller_idempotency_key", columnNames = {"callerId", "idempotencyKey"})
+                @UniqueConstraint(name = "uk_idempotency_key", columnNames = {"idempotencyKey"})
         }
 )
 @Getter
@@ -26,20 +26,34 @@ public class IdempotencyRecord {
     @Column(nullable = false)
     private String callerId;
 
-    @Column(nullable = false)
+    /**
+     * Globally unique across all callers: one key may only ever describe one transfer.
+     */
+    @Column(nullable = false, unique = true)
     private String idempotencyKey;
 
     @Column(nullable = false)
     private Long transferId;
 
+    /**
+     * Fingerprint of the request payload (from/to/amount) that first used this key.
+     * A replay with a different fingerprint is a conflict, not a retry.
+     */
+    @Column(length = 128)
+    private String requestHash;
+
     @Column(nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
 
     public IdempotencyRecord(String callerId, String idempotencyKey, Long transferId) {
+        this(callerId, idempotencyKey, transferId, null);
+    }
+
+    public IdempotencyRecord(String callerId, String idempotencyKey, Long transferId, String requestHash) {
         this.callerId = callerId;
         this.idempotencyKey = idempotencyKey;
         this.transferId = transferId;
+        this.requestHash = requestHash;
         this.createdAt = Instant.now();
     }
 }
-
