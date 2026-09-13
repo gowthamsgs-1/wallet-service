@@ -13,12 +13,22 @@ RUN mvn -B clean package -DskipTests
 FROM eclipse-temurin:17-jre
 WORKDIR /app
 
-# Run as a non-root user
+# Install curl as root for health check, then wipe apt cache to keep image slim
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create and switch to non-root user
 RUN useradd --system --create-home --shell /usr/sbin/nologin wallet
 USER wallet
 
 COPY --from=build /build/target/*.jar app.jar
 
 EXPOSE 8080
+
+# Health check runs as the 'wallet' user using the installed curl
+HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
+  CMD curl -f http://localhost:8080/actuator/health || exit 1
+
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 
