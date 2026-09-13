@@ -28,6 +28,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest
 public class WalletTransferIntegrationTests {
 
+    /** Global service context root ({@code wallet.api.base-path}); also the security boundary. */
+    private static final String BASE_PATH = "/wallet-service";
+
+    /** Versioned API prefix: base path + the version declared on the controllers. */
+    private static final String API = BASE_PATH + "/v1";
+
     @Autowired
     private WebApplicationContext context;
 
@@ -71,21 +77,35 @@ public class WalletTransferIntegrationTests {
 
     @Test
     void shouldRequireBearerToken() throws Exception {
-        mockMvc.perform(post("/wallets"))
+        mockMvc.perform(post(API + "/wallets"))
                 .andExpect(status().isUnauthorized());
 
-        mockMvc.perform(get("/wallets/1"))
+        mockMvc.perform(get(API + "/wallets/1"))
                 .andExpect(status().isUnauthorized());
 
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
                 .andExpect(status().isUnauthorized());
     }
 
+    /**
+     * The security boundary is the service base path, not a hardcoded list of versioned resources.
+     * A future /v2 (or any new resource) must be authenticated without touching BearerTokenFilter;
+     * 401 rather than 404 proves the filter rejected the request before routing.
+     */
+    @Test
+    void shouldAuthenticateEveryPathUnderTheBasePathRegardlessOfVersion() throws Exception {
+        mockMvc.perform(get(BASE_PATH + "/v2/transfers/1"))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(get(BASE_PATH + "/v1/some-future-resource"))
+                .andExpect(status().isUnauthorized());
+    }
+
     @Test
     void shouldReturnGeneratedCorrelationIdWhenNoneSupplied() throws Exception {
-        mockMvc.perform(post("/wallets")
+        mockMvc.perform(post(API + "/wallets")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice"))
                 .andExpect(status().isOk())
                 .andExpect(header().exists("X-Correlation-Id"))
@@ -94,7 +114,7 @@ public class WalletTransferIntegrationTests {
 
     @Test
     void shouldEchoSuppliedCorrelationId() throws Exception {
-        mockMvc.perform(post("/wallets")
+        mockMvc.perform(post(API + "/wallets")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .header("X-Correlation-Id", "trace-abc-123"))
                 .andExpect(status().isOk())
@@ -104,21 +124,21 @@ public class WalletTransferIntegrationTests {
     @Test
     void shouldGetOrCreateWallet() throws Exception {
         // tok-alice resolves to alice
-        mockMvc.perform(post("/wallets")
+        mockMvc.perform(post(API + "/wallets")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.owner_id", is("alice")))
                 .andExpect(jsonPath("$.balance_paise", is(100_000)));
 
         // tok-charlie does not exist, so a new wallet is created with 0 paise
-        mockMvc.perform(post("/wallets")
+        mockMvc.perform(post(API + "/wallets")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-charlie"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.owner_id", is("charlie")))
                 .andExpect(jsonPath("$.balance_paise", is(0)));
 
         // Test POST /wallets/ with trailing slash
-        mockMvc.perform(post("/wallets/")
+        mockMvc.perform(post(API + "/wallets/")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-david"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.owner_id", is("david")))
@@ -128,7 +148,7 @@ public class WalletTransferIntegrationTests {
     @Test
     void shouldSupportInitialBalanceOnWalletCreation() throws Exception {
         // Create wallet with explicit initial balance in paise
-        mockMvc.perform(post("/wallets")
+        mockMvc.perform(post(API + "/wallets")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-eve")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"initial_balance_paise\": 75000}"))
@@ -137,7 +157,7 @@ public class WalletTransferIntegrationTests {
                 .andExpect(jsonPath("$.balance_paise", is(75_000)));
 
         // Subsequent getOrCreate does not overwrite the balance
-        mockMvc.perform(post("/wallets")
+        mockMvc.perform(post(API + "/wallets")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-eve")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"initial_balance_paise\": 10000}"))
@@ -146,7 +166,7 @@ public class WalletTransferIntegrationTests {
                 .andExpect(jsonPath("$.balance_paise", is(75_000)));
 
         // Negative initial balance should be rejected with 400 Bad Request
-        mockMvc.perform(post("/wallets")
+        mockMvc.perform(post(API + "/wallets")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-frank")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"initial_balance_paise\": -100}"))
@@ -159,14 +179,14 @@ public class WalletTransferIntegrationTests {
         Wallet bobWallet = walletRepository.findByOwnerId("bob").orElseThrow();
 
         // Alice views her own wallet
-        mockMvc.perform(get("/wallets/" + aliceWallet.getId())
+        mockMvc.perform(get(API + "/wallets/" + aliceWallet.getId())
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id", is(aliceWallet.getId().intValue())))
                 .andExpect(jsonPath("$.balance_paise", is(100_000)));
 
         // Alice tries to view Bob's wallet -> 403 Forbidden
-        mockMvc.perform(get("/wallets/" + bobWallet.getId())
+        mockMvc.perform(get(API + "/wallets/" + bobWallet.getId())
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice"))
                 .andExpect(status().isForbidden());
     }
@@ -183,7 +203,7 @@ public class WalletTransferIntegrationTests {
                 "tx-key-101"
         );
 
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
@@ -214,7 +234,7 @@ public class WalletTransferIntegrationTests {
         );
 
         // First transfer call
-        String firstResponse = mockMvc.perform(post("/transfers")
+        String firstResponse = mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
@@ -224,7 +244,7 @@ public class WalletTransferIntegrationTests {
         Long firstTransferId = objectMapper.readTree(firstResponse).get("id").asLong();
 
         // Second transfer call with the exact same idempotency key
-        String secondResponse = mockMvc.perform(post("/transfers")
+        String secondResponse = mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
@@ -254,7 +274,7 @@ public class WalletTransferIntegrationTests {
                 "tx-insufficient"
         );
 
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
@@ -274,7 +294,7 @@ public class WalletTransferIntegrationTests {
         TransferRequest tooBig = new TransferRequest(
                 aliceWallet.getId(), bobWallet.getId(), 999_999L, "reused-key");
 
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(tooBig)))
@@ -284,14 +304,14 @@ public class WalletTransferIntegrationTests {
         TransferRequest smaller = new TransferRequest(
                 aliceWallet.getId(), bobWallet.getId(), 1_000L, "reused-key");
 
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(smaller)))
                 .andExpect(status().isConflict());
 
         // Same key, identical body -> original failure is replayed
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(tooBig)))
@@ -311,7 +331,7 @@ public class WalletTransferIntegrationTests {
         TransferRequest aliceRequest = new TransferRequest(
                 aliceWallet.getId(), bobWallet.getId(), 5_000L, "shared-key");
 
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(aliceRequest)))
@@ -321,7 +341,7 @@ public class WalletTransferIntegrationTests {
         TransferRequest bobRequest = new TransferRequest(
                 bobWallet.getId(), aliceWallet.getId(), 1_000L, "shared-key");
 
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-bob")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(bobRequest)))
@@ -344,14 +364,14 @@ public class WalletTransferIntegrationTests {
         // 1. A successful transfer
         TransferRequest ok = new TransferRequest(
                 aliceWallet.getId(), bobWallet.getId(), 1_000L, "metrics-ok");
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(ok)))
                 .andExpect(status().isCreated());
 
         // 2. Replaying the same key
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(ok)))
@@ -360,7 +380,7 @@ public class WalletTransferIntegrationTests {
         // 3. A transfer that cannot be funded
         TransferRequest broke = new TransferRequest(
                 aliceWallet.getId(), bobWallet.getId(), 9_999_999L, "metrics-broke");
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(broke)))
@@ -393,7 +413,7 @@ public class WalletTransferIntegrationTests {
                 "tx-unauthorized-sender"
         );
 
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-bob")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
@@ -411,7 +431,7 @@ public class WalletTransferIntegrationTests {
                 1_000L,
                 "tx-same-wallet"
         );
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(sameWalletRequest)))
@@ -424,7 +444,7 @@ public class WalletTransferIntegrationTests {
                 0L,
                 "tx-zero-amount"
         );
-        mockMvc.perform(post("/transfers")
+        mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(nonPositiveRequest)))
@@ -443,7 +463,7 @@ public class WalletTransferIntegrationTests {
                 "tx-status-check"
         );
 
-        String createResponse = mockMvc.perform(post("/transfers")
+        String createResponse = mockMvc.perform(post(API + "/transfers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
@@ -453,7 +473,7 @@ public class WalletTransferIntegrationTests {
         Long transferId = objectMapper.readTree(createResponse).get("id").asLong();
 
         // Query status with Alice
-        mockMvc.perform(get("/transfers/" + transferId)
+        mockMvc.perform(get(API + "/transfers/" + transferId)
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id", is(transferId.intValue())))
@@ -461,14 +481,14 @@ public class WalletTransferIntegrationTests {
                 .andExpect(jsonPath("$.amount_paise", is(15_000)));
 
         // Query status with Bob (recipient)
-        mockMvc.perform(get("/transfers/" + transferId)
+        mockMvc.perform(get(API + "/transfers/" + transferId)
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-bob"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id", is(transferId.intValue())))
                 .andExpect(jsonPath("$.status", is("COMPLETED")));
 
         // Unrelated user cannot view transfer
-        mockMvc.perform(get("/transfers/" + transferId)
+        mockMvc.perform(get(API + "/transfers/" + transferId)
                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-carol"))
                 .andExpect(status().isForbidden());
     }
@@ -488,14 +508,14 @@ public class WalletTransferIntegrationTests {
                 try {
                     if (index % 2 == 0) {
                         TransferRequest req = new TransferRequest(aliceWallet.getId(), bobWallet.getId(), 100L, "concurrent-alice-" + index);
-                        mockMvc.perform(post("/transfers")
+                        mockMvc.perform(post(API + "/transfers")
                                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-alice")
                                         .contentType(MediaType.APPLICATION_JSON)
                                         .content(objectMapper.writeValueAsString(req)))
                                 .andExpect(status().isCreated());
                     } else {
                         TransferRequest req = new TransferRequest(bobWallet.getId(), aliceWallet.getId(), 100L, "concurrent-bob-" + index);
-                        mockMvc.perform(post("/transfers")
+                        mockMvc.perform(post(API + "/transfers")
                                         .header(HttpHeaders.AUTHORIZATION, "Bearer tok-bob")
                                         .contentType(MediaType.APPLICATION_JSON)
                                         .content(objectMapper.writeValueAsString(req)))
@@ -523,9 +543,3 @@ public class WalletTransferIntegrationTests {
         assertEquals(120_000L, updatedAlice.getBalancePaise() + updatedBob.getBalancePaise());
     }
 }
-
-
-
-
-
-

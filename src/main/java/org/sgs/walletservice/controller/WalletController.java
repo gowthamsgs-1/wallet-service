@@ -2,6 +2,7 @@ package org.sgs.walletservice.controller;
 
 import jakarta.validation.Valid;
 import org.sgs.walletservice.auth.AuthContext;
+import org.sgs.walletservice.config.ApiVersions;
 import org.sgs.walletservice.domain.Wallet;
 import org.sgs.walletservice.dto.CreateWalletRequest;
 import org.sgs.walletservice.dto.WalletResponse;
@@ -11,7 +12,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
-@RequestMapping("/wallets")
+@RequestMapping(ApiVersions.V1 + "/wallets")
 public class WalletController {
 
     private final WalletService walletService;

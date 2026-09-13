@@ -4,6 +4,7 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.sgs.walletservice.config.ApiProperties;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -12,21 +13,35 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 @Component
 public class BearerTokenFilter extends OncePerRequestFilter {
 
     private final TokenService tokenService;
+    private final String securedPathPrefix;
+    private final List<String> publicPaths;
 
-    public BearerTokenFilter(TokenService tokenService) {
+    public BearerTokenFilter(TokenService tokenService, ApiProperties apiProperties) {
         this.tokenService = tokenService;
+        this.securedPathPrefix = apiProperties.getSecuredPathPrefix();
+        this.publicPaths = List.copyOf(apiProperties.getPublicPaths());
     }
 
+    /**
+     * Deny by default: everything under the service base path is authenticated regardless of API
+     * version, so adding /v2 (or any new resource) is protected because nothing was done, rather
+     * than unprotected because something was forgotten. Actuator lives at the root
+     * (/health, /metrics), outside the base path, and is therefore untouched.
+     */
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getRequestURI();
-        return !(path.startsWith("/wallets") || path.startsWith("/transfers"));
+        if (!path.startsWith(securedPathPrefix)) {
+            return true;
+        }
+        return publicPaths.stream().anyMatch(path::startsWith);
     }
 
     @Override

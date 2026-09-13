@@ -26,9 +26,10 @@ COPY --from=build /build/target/*.jar app.jar
 
 EXPOSE 8080
 
-# Health check runs as the 'wallet' user using the installed curl
+# Health check runs as the 'wallet' user using the installed curl.
+# Actuator uses base-path '/', so health is at /health (not /actuator/health).
 HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
-  CMD curl -f http://localhost:8080/actuator/health || exit 1
+  CMD curl -f http://localhost:8080/health || exit 1
 
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 
